@@ -5,6 +5,12 @@
 #
 #  Use and distribution licensed under the BSD license.  See
 #  the COPYING file for full text.
+# gleeco:
+# remove YAML nonsense in lieu of getopt flags
+# make server/port more flexible
+# todo:
+#   add static metadata, eg. threads
+#   cleanup
 
 use strict;
 use warnings FATAL => 'all';
@@ -13,21 +19,61 @@ use AnyEvent;
 use AnyEvent::Socket;
 use AnyEvent::Handle;
 use Getopt::Long;
-use YAML qw/Dump Load LoadFile/;
 use Term::ReadKey qw/ReadMode ReadKey GetTerminalSize/;
 
-our $VERSION = '0.1';
+our $VERSION = '0.1.1';
 
 my $CLEAR     = `clear`;
 my @TERM_SIZE = ();
-$|++;
+my $CONF;
 
-my %opts = ();
-GetOptions(\%opts, 'help|h', 'config=s');
+my %CONS    = ();
+my $LAST_RUN = time; # time after the last loop cycle.
+my $TIME_SINCE_LAST_RUN = time; # time since last loop cycle.
+my $loop_timer;
+my $main_cond;
+my $prev_stats_results;
 
-if ($opts{help}) {
-    show_help(); exit;
+
+my %opt = (
+    'S=s'   => 'server:port or /path/to/socket',
+    'H=s'   => 'hostname or host:port',
+    'P=i'   => 'port number',
+    'h'     => 'here we are',
+    'd=i'   => 'delay',
+);
+
+
+sub main{
+    init();
+    $|++;
+    # start main loop
+    fire_main_loop();
+
 }
+
+
+sub init {
+    my $o   = shift || {};
+
+    GetOptions( $o, keys %opt );
+
+    $o->{h} and usage() and exit;
+
+    my $s   = $o->{H} || 'localhost';
+    $s      .=  $o->{P} ?":$o->{P}"  : ":11211";
+    $s      = $o->{S} if $o->{S};         # trump!
+    $CONF = {
+        delay => $o->{d} || 3,
+        mode  => 't',
+        top_mode => { sort_column => 'hit_rate', sort_order => 'desc',
+            columns => [ 'hostname', 'all_version', 'all_fill_rate',
+                'hit_rate', 'evictions', 'get_hits', 'get_misses' ], },
+        servers => [ $s ],
+    };
+}
+
+
 
 $SIG{INT} = sub {
     ReadMode('normal');
@@ -35,14 +81,6 @@ $SIG{INT} = sub {
     exit;
 };
 
-# TODO: merge some GetOptions stuff on top of the loaded config.
-my $CONF = load_config();
-my %CONS    = ();
-my $LAST_RUN = time; # time after the last loop cycle.
-my $TIME_SINCE_LAST_RUN = time; # time since last loop cycle.
-my $loop_timer;
-my $main_cond;
-my $prev_stats_results;
 
 my %display_modes = (
     't' => \&display_top_mode,
@@ -72,7 +110,7 @@ my %column_format_totals = (
 ReadMode('cbreak');
 my $LAST_KEY = '';
 my $read_keys = AnyEvent->io (
-    fh => \*STDIN, poll => 'r',
+   fh => \*STDIN, poll => 'r',
     cb => sub {
         $LAST_KEY = ReadKey(-1);
         # If there is a running timer, cancel it.
@@ -85,8 +123,6 @@ my $read_keys = AnyEvent->io (
     }
 );
 
-# start main loop
-fire_main_loop();
 
 ### AnyEvent related code.
 
@@ -142,7 +178,7 @@ sub main_loop {
 
     my $end  = AnyEvent->time;
     my $diff = $LAST_RUN - $start;
-    print "loop took: $diff";
+    printf "loop took: %02.4f", $diff;
     return $diff;
 }
 
@@ -236,6 +272,7 @@ sub compute_hit_rate {
 
 sub compute_fill_rate {
     my $s = $_[1];
+    $s->{bytes} && $s->{limit_maxbytes} or return 0;
     return $s->{bytes} / $s->{limit_maxbytes};
 }
 
@@ -530,49 +567,10 @@ sub clear_screen {
     print $CLEAR;
 }
 
-# tries minimally to find a localized config file.
-# TODO: Handle the YAML error and make it prettier.
-sub load_config {
-    my $config = $opts{config} if $opts{config};
 
-    my $default = {
-        delay => 3,
-        mode  => 't',
-        top_mode => { sort_column => 'hit_rate', sort_order => 'desc',
-            columns => [ 'hostname', 'all_version', 'all_fill_rate',
-                'hit_rate', 'evictions', 'get_hits', 'get_misses' ], },
-        servers => [ '127.0.0.1:11211' ],
-    };
-
-    # If config has been overridden, don't do the merge down.
-    if ($config) {
-        return LoadFile($config);
-    } else {
-        my $global  = '/etc/damemtop.yaml';
-        my $homedir = "$ENV{HOME}/.damemtop/damemtop.yaml";
-        my $local   = './damemtop.yaml';
-        $global  = -e $global ? LoadFile($global) : {};
-        $homedir = -e $homedir ? LoadFile($homedir) : {};
-        $local   = -e $local ? LoadFile($local) : {};
-
-        # Merge.
-        my %final = (%{$default}, %{$global}, %{$homedir}, %{$local});
-        return \%final;
-    }
-}
-
-sub show_help {
+sub usage {
     print <<"ENDHELP";
 dormando's awesome memcached top utility version v$VERSION
-
-This program is copyright (c) 2009 Dormando.
-Use and distribution licensed under the BSD license.  See
-the COPYING file for full text.
-
-contact: dormando\@rydia.net or memcached\@googlegroups.com.
-
-This early version requires you to edit the ~/.damemtop/damemtop.yaml
-(or /etc/damemtop.yaml) file in order to change options.
 
 You may display any column that is in the output of
 'stats', 'stats items', or 'stats slabs' from memcached's ASCII protocol.
@@ -585,5 +583,11 @@ Some special "computed" columns exist:
 hit_rate (get/miss hit ratio)
 fill_rate (% bytes used out of the maximum memory limit)
 ENDHELP
-    exit;
 }
+
+
+main();
+
+1;
+
+__END__
